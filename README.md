@@ -73,7 +73,7 @@ EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
 ### Run the application
 
 ```bash
-streamlit run webpage_rag_chatbot.py
+streamlit run webpage_rag_chatbot_simple.py
 ```
 
 The application will open in your default browser at `http://localhost:8501`

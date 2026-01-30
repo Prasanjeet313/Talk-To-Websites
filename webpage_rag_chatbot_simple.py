@@ -11,7 +11,8 @@ import requests
 from bs4 import BeautifulSoup
 import logging
 
-
+from dotenv import load_dotenv
+load_dotenv()
 # LangChain imports
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
@@ -33,8 +34,8 @@ class Config:
     GROQ_API_KEY: str = os.environ.get("GROQ_API_KEY", "")
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
     GROQ_MODEL: str = "llama-3.1-8b-instant"
-    CHUNK_SIZE: int = 1000
-    CHUNK_OVERLAP: int = 200
+    CHUNK_SIZE: int = 256
+    CHUNK_OVERLAP: int = 50
     TEMPERATURE: float = 0.7
     MAX_TOKENS: int = 2048
 
@@ -252,7 +253,7 @@ Use the following pieces of context from the webpage to answer the question at t
 If you don't know the answer based on the context, just say that you don't know, don't try to make up an answer.
 Always provide detailed and accurate answers based on the webpage content.
 
-Context from the webpage:
+Context chunks from the webpage which remember that chunk are parts of a webpage:
 {context}
 
 Chat History:
@@ -260,7 +261,7 @@ Chat History:
 
 Question: {question}
 
-Helpful Answer:"""
+Answer:"""
         
         QA_PROMPT = PromptTemplate(
             template=template,
@@ -507,7 +508,7 @@ def main():
                     with st.expander("📚 View Sources"):
                         for i, doc in enumerate(message["sources"][:3], 1):
                             st.caption(f"**Source {i}:**")
-                            st.text(doc.page_content[:300] + "...")
+                            st.text(doc.page_content + "...")
                             st.divider()
         
         # Chat input
@@ -533,7 +534,7 @@ def main():
                             with st.expander("📚 View Sources"):
                                 for i, doc in enumerate(response['source_documents'][:3], 1):
                                     st.caption(f"**Source {i}:**")
-                                    st.text(doc.page_content[:300] + "...")
+                                    st.text(doc.page_content + "...")
                                     st.divider()
                         
                         # Add to chat history with sources
