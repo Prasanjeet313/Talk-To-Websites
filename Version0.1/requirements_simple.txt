@@ -1,0 +1,30 @@
+# Core dependencies
+streamlit>=1.30.0
+python-dotenv>=1.0.0
+
+# Web scraping
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+
+# Advanced web scraping (Cloudflare bypass)
+undetected-chromedriver>=3.5.0
+selenium>=4.15.0
+
+# LangChain and related
+langchain>=0.1.0
+langchain-community>=0.0.20
+langchain-groq>=0.1.0
+
+# Vector store and embeddings
+faiss-cpu>=1.7.4
+# For GPU support, use: faiss-gpu>=1.7.4
+sentence-transformers>=2.2.0
+
+# Additional ML dependencies
+torch>=2.0.0
+transformers>=4.30.0
+huggingface-hub>=0.16.0
+
+# Utilities
+typing-extensions>=4.5.0
