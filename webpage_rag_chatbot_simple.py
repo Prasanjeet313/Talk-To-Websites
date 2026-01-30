@@ -11,10 +11,31 @@ import requests
 from bs4 import BeautifulSoup
 import logging
 import time
+import json
+import hashlib
+from pathlib import Path
+import pickle
+import numpy as np
+from datetime import datetime
 
 from dotenv import load_dotenv
 # Load env vars
 load_dotenv()
+
+# Optional Cloudflare-bypass libraries
+try:
+    import curl_cffi.requests as cc_requests
+    CURL_CFFI_AVAILABLE = True
+except Exception:
+    cc_requests = None
+    CURL_CFFI_AVAILABLE = False
+
+try:
+    from playwright.sync_api import sync_playwright
+    PLAYWRIGHT_AVAILABLE = True
+except Exception:
+    sync_playwright = None
+    PLAYWRIGHT_AVAILABLE = False
 
 # --- MODIFIED IMPORTS FOR STABILITY ---
 # Use langchain_text_splitters to avoid import errors in newer versions
@@ -39,34 +60,174 @@ logger = logging.getLogger(__name__)
 class Config:
     """Configuration class for the application"""
     # Use st.secrets for Cloud deployment compatibility, fallback to os.environ
-    GROQ_API_KEY: str = os.environ.get("GROQ_API_KEY", st.secrets.get("GROQ_API_KEY", ""))
+    GROQ_API_KEY: str = os.environ.get("GROQ_API_KEY", "")
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
     GROQ_MODEL: str = "llama-3.1-8b-instant"
     CHUNK_SIZE: int = 1000
     CHUNK_OVERLAP: int = 200
     TEMPERATURE: float = 0.7
     MAX_TOKENS: int = 2048
+    OUTPUT_DIR: str = os.environ.get("OUTPUT_DIR", "outputs")
+    # scraper backend: 'auto' | 'requests' | 'curl_cffi' | 'playwright'
+    SCRAPER_BACKEND: str = os.environ.get("SCRAPER_BACKEND", "auto")
+    # Playwright headless mode
+    PLAYWRIGHT_HEADLESS: bool = os.environ.get("PLAYWRIGHT_HEADLESS", "1") == "1"
+
+# Default output directory (can be overridden via env or Config)
+DEFAULT_OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "outputs")
+
+def ensure_dir(path: str):
+    Path(path).mkdir(parents=True, exist_ok=True)
+
+
+def url_to_filename(url: str, suffix: str = "") -> str:
+    h = hashlib.sha256(url.encode("utf-8")).hexdigest()[:8]
+    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    return f"{ts}_{h}{suffix}"
+
+
+def save_bytes(output_dir: str, filename: str, data: bytes):
+    ensure_dir(output_dir)
+    Path(output_dir, filename).write_bytes(data)
+
+
+def save_text(output_dir: str, filename: str, text: str):
+    ensure_dir(output_dir)
+    Path(output_dir, filename).write_text(text, encoding='utf-8')
+
+
+def save_json(output_dir: str, filename: str, obj):
+    ensure_dir(output_dir)
+    Path(output_dir, filename).write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding='utf-8')
+
+
+def save_pickle(output_dir: str, filename: str, obj):
+    ensure_dir(output_dir)
+    with open(Path(output_dir, filename), 'wb') as f:
+        pickle.dump(obj, f)
+
+
+def save_chat_history(output_dir: str, chat_history):
+    try:
+        filename = f"chat_{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}.json"
+        save_json(os.path.join(output_dir, 'chats'), filename, chat_history)
+    except Exception as e:
+        logger.warning(f"Could not save chat history: {e}")
+
 
 class WebScraper:
     """
     Streamlit Cloud Compatible Scraper
-    Uses requests + BeautifulSoup instead of Selenium to avoid browser binary issues.
+    Supports requests, curl_cffi, or Playwright to bypass Cloudflare when needed.
     """
-    def __init__(self):
+    def __init__(self, config: Optional[Config] = None):
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
+        self.config = config or Config()
+        self.backend = (self.config.SCRAPER_BACKEND or 'auto').lower()
+        self.playwright_headless = getattr(self.config, 'PLAYWRIGHT_HEADLESS', True)
+
+    def _looks_like_cloudflare(self, text: str, status: int) -> bool:
+        if status in (403, 429, 503):
+            return True
+        if not text:
+            return True
+        low = text.lower()
+        checks = [
+            'cloudflare',
+            'checking your browser',
+            'attention required',
+            'cf-chl-bypass',
+            'hit 1 sec'
+        ]
+        return any(c in low for c in checks)
+
+    def _fetch_requests(self, url: str, timeout: int = 15):
+        try:
+            resp = requests.get(url, headers=self.headers, timeout=timeout)
+            return {'status_code': getattr(resp, 'status_code', 200), 'content': getattr(resp, 'content', b''), 'text': getattr(resp, 'text', '')}
+        except Exception as e:
+            raise
+
+    def _fetch_curl_cffi(self, url: str, timeout: int = 15):
+        if not CURL_CFFI_AVAILABLE:
+            raise ImportError('curl_cffi not available')
+        resp = cc_requests.get(url, headers=self.headers, timeout=timeout)
+        return {'status_code': getattr(resp, 'status_code', 200), 'content': getattr(resp, 'content', b''), 'text': getattr(resp, 'text', '')}
+
+    def _fetch_playwright(self, url: str, timeout: int = 30):
+        if not PLAYWRIGHT_AVAILABLE:
+            raise ImportError('Playwright not available')
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=self.playwright_headless)
+            page = browser.new_page(user_agent=self.headers.get('User-Agent'))
+            try:
+                page.set_default_navigation_timeout(timeout * 1000)
+                page.goto(url, wait_until='networkidle')
+                content = page.content()
+                # Playwright does not expose status easily for page content; assume 200 on success
+                return {'status_code': 200, 'content': content.encode('utf-8'), 'text': content}
+            finally:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
 
     def scrape_url(self, url: str) -> Dict[str, Any]:
         """
         Scrape content from a given URL using requests
         """
         try:
-            logger.info(f"Scraping URL: {url}")
-            response = requests.get(url, headers=self.headers, timeout=15)
-            response.raise_for_status()
-            
-            soup = BeautifulSoup(response.content, 'html.parser')
+            logger.info(f"Scraping URL: {url} using backend={self.backend}")
+
+            last_exc = None
+            resp = None
+
+            # Helper to try a fetcher and set resp
+            def try_fetch(fetch_fn, *a, **kw):
+                nonlocal last_exc, resp
+                try:
+                    resp = fetch_fn(*a, **kw)
+                    return True
+                except Exception as e:
+                    last_exc = e
+                    logger.debug(f"Fetcher {fetch_fn.__name__} failed: {e}")
+                    return False
+
+            # Decide order
+            tried = []
+            if self.backend == 'requests':
+                try_fetch(self._fetch_requests, url)
+                tried = ['requests']
+            elif self.backend == 'curl_cffi':
+                try_fetch(self._fetch_curl_cffi, url)
+                tried = ['curl_cffi']
+            elif self.backend == 'playwright':
+                try_fetch(self._fetch_playwright, url)
+                tried = ['playwright']
+            else:  # auto
+                # Try requests first
+                if try_fetch(self._fetch_requests, url):
+                    tried.append('requests')
+                    if self._looks_like_cloudflare(resp.get('text', ''), resp.get('status_code', 200)):
+                        logger.info('Detected possible Cloudflare/JS protection; trying curl_cffi')
+                        if CURL_CFFI_AVAILABLE and try_fetch(self._fetch_curl_cffi, url):
+                            tried.append('curl_cffi')
+                        elif PLAYWRIGHT_AVAILABLE and try_fetch(self._fetch_playwright, url):
+                            tried.append('playwright')
+                else:
+                    # try curl_cffi then playwright
+                    if CURL_CFFI_AVAILABLE and try_fetch(self._fetch_curl_cffi, url):
+                        tried.append('curl_cffi')
+                    elif PLAYWRIGHT_AVAILABLE and try_fetch(self._fetch_playwright, url):
+                        tried.append('playwright')
+
+            if not resp:
+                raise last_exc or RuntimeError('All fetchers failed')
+
+            content_bytes = resp.get('content', b'') if resp.get('content', None) is not None else (resp.get('text', '') or '').encode('utf-8')
+            soup = BeautifulSoup(content_bytes, 'html.parser')
 
             # Remove script and style elements
             for script in soup(["script", "style", "nav", "footer", "header", "meta", "noscript"]):
@@ -92,7 +253,20 @@ class WebScraper:
             if len(text) < 100:
                 logger.warning("Scraped content is very short. Page might be JS-rendered.")
 
-            logger.info(f"Successfully scraped {len(text)} characters from {url}")
+            logger.info(f"Successfully scraped {len(text)} characters from {url} (via {','.join(tried)})")
+
+            # Save artifacts: raw HTML, cleaned text, and metadata
+            try:
+                html_filename = url_to_filename(url, '.html')
+                save_bytes(os.path.join(DEFAULT_OUTPUT_DIR, 'html'), html_filename, content_bytes)
+                text_filename = url_to_filename(url, '.txt')
+                save_text(os.path.join(DEFAULT_OUTPUT_DIR, 'text'), text_filename, text)
+                metadata_filename = url_to_filename(url, '.json')
+                meta = {'url': url, 'title': title_text, 'chars': len(text), 'saved_at': datetime.utcnow().isoformat(), 'backend_tried': tried}
+                save_json(os.path.join(DEFAULT_OUTPUT_DIR, 'metadata'), metadata_filename, meta)
+            except Exception as e:
+                logger.warning(f"Could not save scraped files: {e}")
+
             return {
                 'url': url,
                 'title': title_text,
@@ -135,6 +309,21 @@ class DocumentProcessor:
         )
         
         chunks = self.text_splitter.split_documents([document])
+
+        # Save chunks to disk as JSON
+        try:
+            chunks_list = []
+            for i, c in enumerate(chunks):
+                chunks_list.append({
+                    'index': i,
+                    'content': c.page_content,
+                    'metadata': c.metadata
+                })
+            chunks_filename = url_to_filename(scraped_data['url'], '_chunks.json')
+            save_json(os.path.join(DEFAULT_OUTPUT_DIR, 'chunks'), chunks_filename, chunks_list)
+        except Exception as e:
+            logger.warning(f"Could not save chunks: {e}")
+
         return chunks
 
 class VectorStoreManager:
@@ -160,6 +349,38 @@ class VectorStoreManager:
             documents=documents,
             embedding=self.embeddings
         )
+
+        # Save vector store and embeddings
+        try:
+            store_name = url_to_filename('vectorstore', '')
+            store_dir = Path(DEFAULT_OUTPUT_DIR) / 'vector_store' / store_name
+            ensure_dir(store_dir.parent)
+            # Try to use FAISS save_local if available
+            if hasattr(self.vector_store, "save_local"):
+                self.vector_store.save_local(str(store_dir))
+                logger.info(f"Saved vector store to {store_dir}")
+            else:
+                # Fallback to pickle
+                save_pickle(str(Path(DEFAULT_OUTPUT_DIR) / 'vector_store'), f"{store_name}.pkl", self.vector_store)
+                logger.info(f"Pickled vector store to {Path(DEFAULT_OUTPUT_DIR) / 'vector_store' / (store_name + '.pkl')}")
+        except Exception as e:
+            logger.warning(f"Could not save vector store: {e}")
+
+        # Save embeddings separately
+        try:
+            texts = [d.page_content for d in documents]
+            embeddings = self.embeddings.embed_documents(texts)
+            embeddings_arr = np.array(embeddings, dtype=np.float32)
+            embed_filename = url_to_filename('embeddings', '.npy')
+            ensure_dir(Path(DEFAULT_OUTPUT_DIR) / 'embeddings')
+            np.save(Path(DEFAULT_OUTPUT_DIR) / 'embeddings' / embed_filename, embeddings_arr)
+            # Save metadata mapping
+            meta = [{'index': i, 'metadata': d.metadata} for i, d in enumerate(documents)]
+            save_json(os.path.join(DEFAULT_OUTPUT_DIR, 'embeddings'), url_to_filename('embeddings_meta', '.json'), meta)
+            logger.info(f"Saved embeddings to {Path(DEFAULT_OUTPUT_DIR) / 'embeddings' / embed_filename}")
+        except Exception as e:
+            logger.warning(f"Could not save embeddings: {e}")
+
         return self.vector_store
     
     def get_retriever(self, k: int = 4):
@@ -342,6 +563,12 @@ def main():
                         "content": response['answer'],
                         "sources": response.get('source_documents')
                     })
+
+                    # Save updated chat history to disk
+                    try:
+                        save_chat_history(st.session_state.config.OUTPUT_DIR, st.session_state.chat_history)
+                    except Exception as e:
+                        logger.warning(f"Could not auto-save chat history: {e}")
 
 if __name__ == "__main__":
     main()
