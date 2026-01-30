@@ -34,8 +34,8 @@ class Config:
     GROQ_API_KEY: str = os.environ.get("GROQ_API_KEY", "")
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
     GROQ_MODEL: str = "llama-3.1-8b-instant"
-    CHUNK_SIZE: int = 256
-    CHUNK_OVERLAP: int = 50
+    CHUNK_SIZE: int = 1000
+    CHUNK_OVERLAP: int = 200
     TEMPERATURE: float = 0.7
     MAX_TOKENS: int = 2048
 
