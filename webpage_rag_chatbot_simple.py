@@ -1,6 +1,6 @@
 """
-Webpage RAG Chatbot - A Streamlit application for querying webpage content
-Uses LangChain, FAISS, and Groq LLM (Simplified version without LangGraph)
+Webpage RAG Chatbot - Streamlit Cloud Compatible Version
+Uses LangChain, FAISS, and Groq LLM (Pure Python Scraping)
 """
 
 import os
@@ -10,11 +10,19 @@ from dataclasses import dataclass
 import requests
 from bs4 import BeautifulSoup
 import logging
+import time
 
 from dotenv import load_dotenv
+# Load env vars
 load_dotenv()
-# LangChain imports
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+# --- MODIFIED IMPORTS FOR STABILITY ---
+# Use langchain_text_splitters to avoid import errors in newer versions
+try:
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+except ImportError:
+    from langchain.text_splitter import RecursiveCharacterTextSplitter
+
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_groq import ChatGroq
@@ -27,11 +35,11 @@ from langchain.schema import Document
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
 @dataclass
 class Config:
     """Configuration class for the application"""
-    GROQ_API_KEY: str = os.environ.get("GROQ_API_KEY", "")
+    # Use st.secrets for Cloud deployment compatibility, fallback to os.environ
+    GROQ_API_KEY: str = os.environ.get("GROQ_API_KEY", st.secrets.get("GROQ_API_KEY", ""))
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
     GROQ_MODEL: str = "llama-3.1-8b-instant"
     CHUNK_SIZE: int = 1000
@@ -39,67 +47,50 @@ class Config:
     TEMPERATURE: float = 0.7
     MAX_TOKENS: int = 2048
 
-
-import undetected_chromedriver as uc
-from selenium.webdriver.common.by import By
-import time
-
 class WebScraper:
-    """Handles web scraping operations using undetected-chromedriver (Selenium)"""
-    def __init__(self, headless: bool = True):
-        self.headless = headless
-        self.driver = None
-        self._init_driver()
+    """
+    Streamlit Cloud Compatible Scraper
+    Uses requests + BeautifulSoup instead of Selenium to avoid browser binary issues.
+    """
+    def __init__(self):
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
 
-    def _init_driver(self):
-        logger.info("Initializing undetected Chrome WebDriver...")
-        try:
-            options = uc.ChromeOptions()
-            options.add_argument('--disable-blink-features=AutomationControlled')
-            if self.headless:
-                options.add_argument('--headless')
-            # Force ChromeDriver version to match installed Chrome (144)
-            self.driver = uc.Chrome(options=options, version_main=144)
-            logger.info("Chrome WebDriver initialized successfully (version_main=144)")
-        except Exception as e:
-            logger.error(f"Failed to initialize WebDriver: {e}")
-            raise
-
-    def scrape_url(self, url: str, wait_time: int = 10) -> Dict[str, Any]:
+    def scrape_url(self, url: str) -> Dict[str, Any]:
         """
-        Scrape content from a given URL using Selenium (bypasses Cloudflare/JS)
-        Args:
-            url: The URL to scrape
-            wait_time: Seconds to wait for page to load
-        Returns:
-            Dictionary containing title, text content, and metadata
+        Scrape content from a given URL using requests
         """
         try:
-            logger.info(f"Scraping URL with Selenium: {url}")
-            self.driver.get(url)
-            logger.info(f"Waiting {wait_time} seconds for page to load...")
-            time.sleep(wait_time)
-            page_source = self.driver.page_source
-            soup = BeautifulSoup(page_source, 'lxml')
+            logger.info(f"Scraping URL: {url}")
+            response = requests.get(url, headers=self.headers, timeout=15)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.content, 'html.parser')
 
             # Remove script and style elements
-            for script in soup(["script", "style", "nav", "footer", "header"]):
+            for script in soup(["script", "style", "nav", "footer", "header", "meta", "noscript"]):
                 script.decompose()
 
             # Get title
             title = soup.find('title')
-            title_text = title.get_text().strip() if title else "No title"
+            title_text = title.get_text().strip() if title else url
 
             # Get main content
+            # Try to find specific content containers first
             main_content = soup.find('main') or soup.find('article') or soup.find('div', class_='content') or soup.body
+            
             if main_content:
                 text = main_content.get_text(separator='\n', strip=True)
             else:
                 text = soup.get_text(separator='\n', strip=True)
 
-            # Clean up text
+            # Clean up text (remove excessive newlines)
             lines = [line.strip() for line in text.split('\n') if line.strip()]
             text = '\n'.join(lines)
+
+            if len(text) < 100:
+                logger.warning("Scraped content is very short. Page might be JS-rendered.")
 
             logger.info(f"Successfully scraped {len(text)} characters from {url}")
             return {
@@ -118,12 +109,6 @@ class WebScraper:
                 'error': str(e)
             }
 
-    def close(self):
-        if self.driver:
-            self.driver.quit()
-            logger.info("Browser closed")
-
-
 class DocumentProcessor:
     """Handles document chunking and processing"""
     
@@ -136,101 +121,63 @@ class DocumentProcessor:
         )
     
     def process_scraped_data(self, scraped_data: Dict[str, Any]) -> List[Document]:
-        """
-        Convert scraped data into LangChain documents and chunk them
-        
-        Args:
-            scraped_data: Dictionary containing scraped webpage data
-            
-        Returns:
-            List of Document objects
-        """
         if not scraped_data.get('success'):
-            logger.warning("Cannot process unsuccessful scrape")
             return []
         
-        # Create metadata
         metadata = {
             'source': scraped_data['url'],
             'title': scraped_data['title']
         }
         
-        # Create document
         document = Document(
             page_content=scraped_data['content'],
             metadata=metadata
         )
         
-        # Split into chunks
         chunks = self.text_splitter.split_documents([document])
-        logger.info(f"Created {len(chunks)} document chunks")
-        
         return chunks
-
 
 class VectorStoreManager:
     """Manages FAISS vector store operations"""
     
     def __init__(self, embedding_model: str, use_gpu: bool = False):
-        logger.info(f"Initializing embeddings with model: {embedding_model}")
+        # Force CPU for Streamlit Cloud to avoid memory/compatibility issues
+        device = 'cpu'
+        logger.info(f"Initializing embeddings on {device}...")
         
-        # Try GPU first if requested, fallback to CPU
-        device = 'cuda' if use_gpu else 'cpu'
-        
-        try:
-            self.embeddings = HuggingFaceEmbeddings(
-                model_name=embedding_model,
-                model_kwargs={'device': device},
-                encode_kwargs={'normalize_embeddings': True}
-            )
-            logger.info(f"Embeddings initialized on {device}")
-        except Exception as e:
-            logger.warning(f"Failed to initialize on {device}, falling back to CPU: {str(e)}")
-            self.embeddings = HuggingFaceEmbeddings(
-                model_name=embedding_model,
-                model_kwargs={'device': 'cpu'},
-                encode_kwargs={'normalize_embeddings': True}
-            )
-        
+        self.embeddings = HuggingFaceEmbeddings(
+            model_name=embedding_model,
+            model_kwargs={'device': device},
+            encode_kwargs={'normalize_embeddings': True}
+        )
         self.vector_store: Optional[FAISS] = None
     
     def create_vector_store(self, documents: List[Document]) -> FAISS:
-        """
-        Create FAISS vector store from documents
-        
-        Args:
-            documents: List of Document objects
-            
-        Returns:
-            FAISS vector store
-        """
         if not documents:
-            raise ValueError("No documents provided to create vector store")
+            raise ValueError("No documents provided")
         
-        logger.info("Creating FAISS vector store...")
         self.vector_store = FAISS.from_documents(
             documents=documents,
             embedding=self.embeddings
         )
-        logger.info("Vector store created successfully")
         return self.vector_store
     
     def get_retriever(self, k: int = 4):
-        """Get retriever from vector store"""
         if self.vector_store is None:
             raise ValueError("Vector store not initialized")
-        
-        return self.vector_store.as_retriever(
-            search_type="similarity",
-            search_kwargs={"k": k}
-        )
-
+        return self.vector_store.as_retriever(search_kwargs={"k": k})
 
 class RAGChatbot:
     """Main RAG chatbot using LangChain and Groq"""
     
     def __init__(self, config: Config):
         self.config = config
+        
+        # Check API Key
+        if not config.GROQ_API_KEY:
+            st.error("Groq API Key not found! Please add it to secrets or .env")
+            st.stop()
+
         self.llm = ChatGroq(
             groq_api_key=config.GROQ_API_KEY,
             model_name=config.GROQ_MODEL,
@@ -245,15 +192,11 @@ class RAGChatbot:
         self.qa_chain = None
         
     def create_qa_chain(self, retriever):
-        """Create conversational retrieval chain"""
-        
-        # Custom prompt template
-        template = """You are a helpful AI assistant specialized in answering questions about webpage content.
+        template = """You are a helpful AI assistant.
 Use the following pieces of context from the webpage to answer the question at the end.
-If you don't know the answer based on the context, just say that you don't know, don't try to make up an answer.
-Always provide detailed and accurate answers based on the webpage content.
+If the answer isn't in the context, say you don't know.
 
-Context chunks from the webpage which remember that chunk are parts of a webpage:
+Context:
 {context}
 
 Chat History:
@@ -273,308 +216,132 @@ Answer:"""
             retriever=retriever,
             memory=self.memory,
             return_source_documents=True,
-            combine_docs_chain_kwargs={"prompt": QA_PROMPT},
-            verbose=False
+            combine_docs_chain_kwargs={"prompt": QA_PROMPT}
         )
-        
         return self.qa_chain
     
     def ask(self, question: str) -> Dict[str, Any]:
-        """
-        Ask a question to the chatbot
-        
-        Args:
-            question: User's question
+        if not self.qa_chain:
+            return {'success': False, 'answer': "Please load a webpage first."}
             
-        Returns:
-            Dictionary containing answer and source documents
-        """
-        if self.qa_chain is None:
-            raise ValueError("QA chain not initialized. Please load a webpage first.")
-        
         try:
-            logger.info(f"Processing question: {question}")
             result = self.qa_chain({"question": question})
-            
             return {
                 'answer': result['answer'],
                 'source_documents': result.get('source_documents', []),
                 'success': True
             }
         except Exception as e:
-            logger.error(f"Error processing question: {str(e)}")
-            return {
-                'answer': f"Error: {str(e)}",
-                'source_documents': [],
-                'success': False
-            }
+            return {'success': False, 'answer': f"Error: {str(e)}"}
     
     def clear_memory(self):
-        """Clear conversation memory"""
         self.memory.clear()
 
-
 class WebpageRAGPipeline:
-    """Complete pipeline for webpage RAG processing"""
-    
-    def __init__(self, config: Config, use_gpu: bool = False):
+    def __init__(self, config: Config):
         self.config = config
         self.scraper = WebScraper()
         self.processor = DocumentProcessor(
             chunk_size=config.CHUNK_SIZE,
             chunk_overlap=config.CHUNK_OVERLAP
         )
-        self.vector_manager = VectorStoreManager(config.EMBEDDING_MODEL, use_gpu=use_gpu)
+        self.vector_manager = VectorStoreManager(config.EMBEDDING_MODEL)
         self.chatbot = RAGChatbot(config)
     
     def process_url(self, url: str) -> Dict[str, Any]:
-        """
-        Process a URL through the complete pipeline
-        
-        Args:
-            url: URL to process
-            
-        Returns:
-            Dictionary with processing results
-        """
         try:
-            # Step 1: Scrape
-            logger.info("Step 1/3: Scraping webpage...")
             scraped_data = self.scraper.scrape_url(url)
-            
             if not scraped_data['success']:
-                return {
-                    'success': False,
-                    'error': scraped_data.get('error', 'Scraping failed'),
-                    'stage': 'scraping'
-                }
+                return {'success': False, 'error': scraped_data.get('error')}
             
-            # Step 2: Process and chunk
-            logger.info("Step 2/3: Processing and chunking documents...")
             documents = self.processor.process_scraped_data(scraped_data)
-            
             if not documents:
-                return {
-                    'success': False,
-                    'error': 'No documents created from scraped content',
-                    'stage': 'processing'
-                }
+                return {'success': False, 'error': 'No content found on page'}
             
-            # Step 3: Create vector store
-            logger.info("Step 3/3: Creating vector store...")
-            vector_store = self.vector_manager.create_vector_store(documents)
-            
-            # Step 4: Initialize chatbot
+            self.vector_manager.create_vector_store(documents)
             retriever = self.vector_manager.get_retriever()
             self.chatbot.create_qa_chain(retriever)
-            
-            logger.info("Pipeline completed successfully!")
             
             return {
                 'success': True,
                 'title': scraped_data['title'],
                 'num_chunks': len(documents),
-                'content_length': len(scraped_data['content']),
-                'url': url
+                'content_length': len(scraped_data['content'])
             }
-            
         except Exception as e:
-            logger.error(f"Pipeline error: {str(e)}")
-            return {
-                'success': False,
-                'error': str(e),
-                'stage': 'pipeline'
-            }
-    
-    def ask(self, question: str) -> Dict[str, Any]:
-        """Ask a question to the chatbot"""
+            return {'success': False, 'error': str(e)}
+
+    def ask(self, question: str):
         return self.chatbot.ask(question)
     
     def clear_memory(self):
-        """Clear conversation memory"""
         self.chatbot.clear_memory()
-
 
 # Streamlit UI
 def main():
-    """Main Streamlit application"""
+    st.set_page_config(page_title="Webpage RAG Chatbot", page_icon="🤖")
+    st.title("🤖 Webpage Chatbot")
     
-    st.set_page_config(
-        page_title="Webpage RAG Chatbot",
-        page_icon="🤖",
-        layout="wide"
-    )
-    
-    st.title("🤖 Webpage RAG Chatbot")
-    st.markdown("### Chat with any webpage using AI")
-    
-    # Initialize session state
     if 'config' not in st.session_state:
         st.session_state.config = Config()
-    
     if 'pipeline' not in st.session_state:
         st.session_state.pipeline = None
-    
     if 'chat_history' not in st.session_state:
         st.session_state.chat_history = []
     
-    if 'webpage_loaded' not in st.session_state:
-        st.session_state.webpage_loaded = False
-    
-    if 'current_url' not in st.session_state:
-        st.session_state.current_url = ""
-    
-    # Sidebar
     with st.sidebar:
-        st.header("⚙️ Configuration")
+        st.header("Configuration")
+        url = st.text_input("Webpage URL", "https://www.example.com")
         
-        # GPU option
-        use_gpu = st.checkbox("Use GPU (if available)", value=False, help="Enable CUDA acceleration")
-        
-        # URL Input
-        url = st.text_input(
-            "Enter Webpage URL",
-            value="https://www.emiratesnbd.com/en/cards/credit-cards",
-            help="Enter the URL of the webpage you want to chat with"
-        )
-        
-        # Load button
-        if st.button("🔄 Load Webpage", type="primary"):
-            if url:
-                with st.spinner("Processing webpage... This may take a moment."):
-                    try:
-                        # Initialize pipeline
-                        pipeline = WebpageRAGPipeline(st.session_state.config, use_gpu=use_gpu)
-                        
-                        # Process URL
-                        result = pipeline.process_url(url)
-                        
-                        if result['success']:
-                            # Save to session state
-                            st.session_state.pipeline = pipeline
-                            st.session_state.webpage_loaded = True
-                            st.session_state.current_url = url
-                            st.session_state.chat_history = []
-                            
-                            st.success("✅ Webpage loaded successfully!")
-                            st.info(f"**Title:** {result['title']}")
-                            st.info(f"**Chunks created:** {result['num_chunks']}")
-                            st.info(f"**Content length:** {result['content_length']:,} characters")
-                        else:
-                            error_msg = result.get('error', 'Unknown error occurred')
-                            stage = result.get('stage', 'unknown')
-                            st.error(f"❌ Error at {stage} stage: {error_msg}")
-                            st.session_state.webpage_loaded = False
-                    
-                    except Exception as e:
-                        st.error(f"❌ Error: {str(e)}")
-                        st.session_state.webpage_loaded = False
-            else:
-                st.warning("⚠️ Please enter a URL")
-        
-        # Display current status
-        st.divider()
-        if st.session_state.webpage_loaded:
-            st.success("✅ Webpage Ready")
-            st.caption(f"URL: {st.session_state.current_url[:50]}...")
-        else:
-            st.info("ℹ️ No webpage loaded")
-        
-        # Clear chat button
-        if st.session_state.webpage_loaded:
-            if st.button("🗑️ Clear Chat History"):
-                st.session_state.chat_history = []
-                if st.session_state.pipeline:
-                    st.session_state.pipeline.clear_memory()
-                st.rerun()
-        
-        # Model info
-        st.divider()
-        st.caption(f"**LLM Model:** {st.session_state.config.GROQ_MODEL}")
-        st.caption(f"**Embedding Model:** {st.session_state.config.EMBEDDING_MODEL}")
-        st.caption(f"**Chunk Size:** {st.session_state.config.CHUNK_SIZE}")
-    
-    # Main chat interface
-    if st.session_state.webpage_loaded:
-        st.markdown("---")
-        
-        # Display chat history
-        for message in st.session_state.chat_history:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
+        if st.button("Load Webpage", type="primary"):
+            with st.spinner("Processing..."):
+                pipeline = WebpageRAGPipeline(st.session_state.config)
+                result = pipeline.process_url(url)
                 
-                # Display sources if available
-                if message["role"] == "assistant" and "sources" in message:
-                    with st.expander("📚 View Sources"):
-                        for i, doc in enumerate(message["sources"][:3], 1):
-                            st.caption(f"**Source {i}:**")
-                            st.text(doc.page_content + "...")
-                            st.divider()
-        
-        # Chat input
-        if question := st.chat_input("Ask a question about the webpage..."):
-            # Add user message to chat history
-            st.session_state.chat_history.append({"role": "user", "content": question})
+                if result['success']:
+                    st.session_state.pipeline = pipeline
+                    st.session_state.chat_history = []
+                    st.success(f"Loaded: {result['title']}")
+                    st.info(f"Chunks: {result['num_chunks']}")
+                else:
+                    st.error(f"Error: {result.get('error')}")
+
+        if st.button("Clear History"):
+            st.session_state.chat_history = []
+            if st.session_state.pipeline:
+                st.session_state.pipeline.clear_memory()
+            st.rerun()
+
+    # Chat Interface
+    for msg in st.session_state.chat_history:
+        st.chat_message(msg["role"]).write(msg["content"])
+        if "sources" in msg:
+            with st.expander("Sources"):
+                for doc in msg["sources"][:2]:
+                    st.caption(doc.page_content[:300] + "...")
+
+    if prompt := st.chat_input():
+        if not st.session_state.pipeline:
+            st.error("Please load a webpage first!")
+        else:
+            st.session_state.chat_history.append({"role": "user", "content": prompt})
+            st.chat_message("user").write(prompt)
             
-            # Display user message
-            with st.chat_message("user"):
-                st.markdown(question)
-            
-            # Get response
             with st.chat_message("assistant"):
                 with st.spinner("Thinking..."):
-                    response = st.session_state.pipeline.ask(question)
+                    response = st.session_state.pipeline.ask(prompt)
+                    st.write(response['answer'])
                     
-                    if response['success']:
-                        answer = response['answer']
-                        st.markdown(answer)
-                        
-                        # Display sources
-                        if response['source_documents']:
-                            with st.expander("📚 View Sources"):
-                                for i, doc in enumerate(response['source_documents'][:3], 1):
-                                    st.caption(f"**Source {i}:**")
-                                    st.text(doc.page_content + "...")
-                                    st.divider()
-                        
-                        # Add to chat history with sources
-                        st.session_state.chat_history.append({
-                            "role": "assistant", 
-                            "content": answer,
-                            "sources": response['source_documents']
-                        })
-                    else:
-                        answer = response['answer']
-                        st.error(answer)
-                        
-                        # Add to chat history
-                        st.session_state.chat_history.append({
-                            "role": "assistant", 
-                            "content": answer
-                        })
-    
-    else:
-        # Welcome message
-        st.info("👈 Please load a webpage from the sidebar to start chatting!")
-        
-        st.markdown("""
-        ### How to use:
-        1. Enter a webpage URL in the sidebar
-        2. Click "Load Webpage" to process the content
-        3. Start asking questions about the webpage!
-        
-        ### Example Questions:
-        - What credit cards are available?
-        - What are the benefits of the Platinum card?
-        - What is the annual fee?
-        - How can I apply for a card?
-        
-        ### Tips:
-        - Use specific questions for better answers
-        - The chatbot remembers conversation context
-        - Check sources to verify information
-        """)
-
+                    if response.get('source_documents'):
+                        with st.expander("Sources"):
+                            for doc in response['source_documents'][:2]:
+                                st.caption(doc.page_content[:300] + "...")
+                    
+                    st.session_state.chat_history.append({
+                        "role": "assistant",
+                        "content": response['answer'],
+                        "sources": response.get('source_documents')
+                    })
 
 if __name__ == "__main__":
     main()
