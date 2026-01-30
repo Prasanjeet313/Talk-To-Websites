@@ -52,17 +52,17 @@ except ImportError:
 # from langchain.prompts import PromptTemplate
 # from langchain.schema import Document
 
-# --- UPDATED IMPORTS FOR LANGCHAIN 1.x ---
+# --- MODERNIZED IMPORTS FOR LANGCHAIN 1.x ---
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_groq import ChatGroq
 
-# Legacy paths have changed in v1.x; use the direct module paths:
-from langchain.chains.conversational_retrieval.base import ConversationalRetrievalChain
-from langchain.memory import ConversationBufferMemory
-from langchain.prompts import PromptTemplate
-from langchain.schema import Document
+# Use langchain_classic for the legacy chains
+from langchain_classic.chains import ConversationalRetrievalChain
+from langchain_classic.memory import ConversationBufferMemory
+from langchain_core.prompts import PromptTemplate
+from langchain_core.documents import Document
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
