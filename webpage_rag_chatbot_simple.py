@@ -654,11 +654,11 @@ class Config:
     """Configuration class for the application"""
     # Use st.secrets for Cloud deployment compatibility, fallback to os.environ
     GROQ_API_KEY: str = os.environ.get("GROQ_API_KEY", st.secrets.get("GROQ_API_KEY", ""))
-    EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
-    GROQ_MODEL: str = "meta-llama/llama-4-maverick-17b-128e-instruct"
-    CHUNK_SIZE: int = 900
-    CHUNK_OVERLAP: int = 300
-    TEMPERATURE: float = 0.7
+    EMBEDDING_MODEL: str = "sentence-transformers/all-mpnet-base-v2"
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    CHUNK_SIZE: int = 800
+    CHUNK_OVERLAP: int = 200
+    TEMPERATURE: float = 0.1
     MAX_TOKENS: int = 2048
     OUTPUT_DIR: str = os.environ.get("OUTPUT_DIR", "outputs")
     # scraper backend: 'auto' | 'requests' | 'curl_cffi' | 'playwright'
@@ -1051,7 +1051,7 @@ class VectorStoreManager:
 
         return self.vector_store
     
-    def get_retriever(self, k: int = 4):
+    def get_retriever(self, k: int = 7):
         if self.vector_store is None:
             raise ValueError("Vector store not initialized")
         return self.vector_store.as_retriever(search_kwargs={"k": k})
@@ -1081,18 +1081,18 @@ class RAGChatbot:
         self.qa_chain = None
         
     def create_qa_chain(self, retriever):
-        template = """You are a helpful AI assistant specialized in answering questions about webpage content.
+        template = """You are a intelligent and accurate webpage content reader specialized in answering questions about webpage content.
 Use the following pieces of context from the webpage to answer the question at the end.
 If you don't know the answer based on the context, just say that you don't know, don't try to make up an answer.
 Always provide detailed and accurate answers based on the webpage content.
 
-Context chunks from the webpage:
+<Context chunks from the webpage>
 {context}
-
-Chat History:
+</Context chunks from the webpage>
+<Chat History>
 {chat_history}
-
-Question: {question}
+</Chat History>
+<Question> {question} </Question>
 
 Answer:"""
         
