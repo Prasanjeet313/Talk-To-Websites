@@ -655,7 +655,7 @@ class Config:
     # Use st.secrets for Cloud deployment compatibility, fallback to os.environ
     GROQ_API_KEY: str = os.environ.get("GROQ_API_KEY", st.secrets.get("GROQ_API_KEY", ""))
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
-    GROQ_MODEL: str = "llama-3.1-8b-instant"
+    GROQ_MODEL: str = "meta-llama/llama-4-maverick-17b-128e-instruct"
     CHUNK_SIZE: int = 1000
     CHUNK_OVERLAP: int = 200
     TEMPERATURE: float = 0.7
