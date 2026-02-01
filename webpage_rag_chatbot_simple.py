@@ -656,8 +656,8 @@ class Config:
     GROQ_API_KEY: str = os.environ.get("GROQ_API_KEY", st.secrets.get("GROQ_API_KEY", ""))
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
     GROQ_MODEL: str = "meta-llama/llama-4-maverick-17b-128e-instruct"
-    CHUNK_SIZE: int = 1000
-    CHUNK_OVERLAP: int = 200
+    CHUNK_SIZE: int = 900
+    CHUNK_OVERLAP: int = 300
     TEMPERATURE: float = 0.7
     MAX_TOKENS: int = 2048
     OUTPUT_DIR: str = os.environ.get("OUTPUT_DIR", "outputs")
